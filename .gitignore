@@ -169,3 +169,19 @@ notebooks/
 # OUTPUT GERADO (MAPAS, RELATÓRIOS, HTMLs)
 # ========================================
 output/
+
+# ========================================
+# PROTEÇÕES CRÍTICAS (OBRIGATÓRIO)
+# ========================================
+
+# Dumps e bases grandes
+*.sql
+*.dump
+
+# Binários nativos
+*.so
+*.dll
+*.dylib
+
+# Ambientes virtuais fora do padrão
+.venv-*
