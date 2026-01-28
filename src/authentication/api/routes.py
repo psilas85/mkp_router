@@ -1,4 +1,4 @@
-#sales_router/src/authentication/api/routes.py
+#mkp_router/src/authentication/api/routes.py
 
 from fastapi import APIRouter, HTTPException, Request, Body
 

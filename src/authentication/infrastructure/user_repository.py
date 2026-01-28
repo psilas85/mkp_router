@@ -1,6 +1,7 @@
-# sales_router/src/authentication/infrastructure/user_repository.py
+#mkp_router/src/authentication/infrastructure/user_repository.py
 
-from database.db_connection import get_connection
+from authentication.infrastructure.db_connection import get_connection
+
 from authentication.entities.user import User
 
 

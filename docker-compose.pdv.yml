@@ -1,0 +1,403 @@
+#sales_router/docker-compose.yml
+
+version: "3.9"
+
+services:
+  # ======================
+  # Base image
+  # ======================
+  base_image:
+    build:
+      context: .
+      dockerfile: Dockerfile.base
+    image: psilas85/mkprouter-base:latest
+
+  # ======================
+  # Auth
+  # ======================
+  authentication_service:
+    build:
+      context: .
+      dockerfile: ./src/authentication/Dockerfile.authentication
+    container_name: mkp_authentication
+    env_file:
+      - .env
+    environment:
+      ENV: production
+      TZ: America/Sao_Paulo
+      PYTHONPATH: /app
+    ports:
+      - "8001:8000"
+    depends_on:
+      - mkprouter_db
+    volumes:
+      - ./src/authentication:/app/authentication
+      - ./src/database:/app/database
+      - ./data:/app/data
+      - ./output:/app/output
+    networks:
+      - mkprouter_net
+    restart: always
+
+  # ======================
+  # Pré-processamento de PDVs (FastAPI)
+  # ======================
+  mkp_preprocessing:
+    build:
+      context: .
+      dockerfile: ./src/mkp_preprocessing/Dockerfile.mkp_preprocessing
+    container_name: mkp_preprocessing
+    env_file:
+      - .env
+    environment:
+      - ENV=production
+      - TZ=America/Sao_Paulo
+      - PYTHONPATH=/app/src
+      - AUTH_SERVICE_URL=http://authentication_service:8000
+      - GMAPS_API_KEY=${GMAPS_API_KEY}
+
+    expose:
+      - "8000"
+    ports:
+      - "8010:8000"  # (opcional: só se quiser acessar diretamente)
+    depends_on:
+      - sales_router_db
+      - redis
+      - authentication_service
+    volumes:
+      - ./src/mkp_preprocessing:/app/src/mkp_preprocessing
+      - ./src/database:/app/src/database
+      - ./data:/app/data
+      - ./output:/app/output
+    networks:
+      - sales_router_net
+    restart: always
+
+  pdv_jobs_worker:
+    build:
+      context: .
+      dockerfile: ./src/mkp_preprocessing/Dockerfile.mkp_preprocessing
+    container_name: pdv_jobs_worker
+    env_file:
+      - .env
+    environment:
+      - PYTHONPATH=/app/src
+      - REDIS_URL=redis://redis:6379/0
+      - NOMINATIM_LOCAL_URL=${NOMINATIM_LOCAL_URL}
+    depends_on:
+      - redis
+      - sales_router_db
+      - mkp_preprocessing
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+      - ./output:/app/output
+    networks:
+      - sales_router_net
+    command: >
+      rq worker -v -u redis://redis:6379/0 pdv_jobs
+
+    restart: always
+
+  # ======================
+  # Clusterização de PDVs (Sales Clusterization)
+  # ======================
+  sales_clusterization:
+    build:
+      context: .
+      dockerfile: ./src/sales_clusterization/Dockerfile.clusterization
+    container_name: sales_clusterization
+    env_file:
+      - .env
+    environment:
+      - DB_HOST=sales_router_db
+      - DB_PORT=5432
+      - DB_NAME=sales_routing_db
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - REDIS_HOST=redis
+      - PYTHONPATH=/app/src
+    expose:
+      - "8004"
+    ports:
+      - "8011:8004"   # opcional, só para debug
+    depends_on:
+      - sales_router_db
+      - redis
+    
+    command: >
+      uvicorn sales_clusterization.api.cluster_api:app
+      --host 0.0.0.0
+      --port 8004
+      --workers 1
+
+
+    volumes:
+      - ./src/sales_clusterization:/app/src/sales_clusterization
+      - ./src/database:/app/src/database
+      - ./data:/app/data
+      - ./output:/app/output
+    networks:
+      - sales_router_net
+    restart: always
+
+  # ======================
+  # Roteirização de Vendas (Sales Routing)
+  # ======================
+  sales_routing:
+    build:
+      context: .
+      dockerfile: ./src/sales_routing/Dockerfile.routing
+    container_name: sales_routing
+    env_file:
+      - .env
+    environment:
+      - DB_HOST=sales_router_db
+      - DB_PORT=5432
+      - AUTH_SERVICE_URL=http://authentication_service:8000
+      - PYTHONPATH=/app/src
+    depends_on:
+      - sales_router_db
+      - redis
+      - authentication_service
+    volumes:
+      - ./src/sales_routing:/app/src/sales_routing
+      - ./src/database:/app/src/database
+      - ./src/cli:/app/src/cli
+      - ./output:/app/output
+      - ./data:/app/data
+
+    expose:
+      - "8005"
+    ports:
+      - "8012:8005"
+    networks:
+      - sales_router_net
+    restart: always
+
+
+
+  # ======================
+  # Banco de Dados (PostgreSQL + PostGIS)
+  # ======================
+  sales_router_db:
+    image: postgis/postgis:17-3.4
+    container_name: sales_router_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: sales_routing_db
+      POSTGRES_MAX_CONNECTIONS: 200
+      POSTGRES_SHARED_BUFFERS: 512MB
+    ports:
+      - "5434:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks:
+      - sales_router_net
+    restart: always
+
+  # ======================
+  # Redis (Cache / Fila)
+  # ======================
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    expose:
+      - "6379"
+    networks:
+      - sales_router_net
+    restart: always
+
+  # ======================
+  # API Gateway (Nginx)
+  # ======================
+  api_gateway:
+    build:
+      context: .
+      dockerfile: ./src/api_gateway/Dockerfile.gateway
+    container_name: api_gateway
+
+    ports:
+      - "127.0.0.1:8080:80"
+
+    depends_on:
+      - authentication_service
+      - mkp_preprocessing
+    volumes:
+      - ./src/api_gateway/nginx.conf:/etc/nginx/conf.d/sales_router.conf:ro
+      - ./output:/app/output
+
+    networks:
+      - sales_router_net
+    restart: always
+
+
+  # ======================
+  # OSRM - Servidor de rotas Sudeste (RJ, SP, MG, ES)
+  # ======================
+  osrm:
+    image: osrm/osrm-backend
+    container_name: osrm
+    command: osrm-routed --algorithm mld /data/sudeste-latest.osrm
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./osrm-data:/data
+    networks:
+      - sales_router_net
+    restart: always
+  
+  # ======================
+  # Clusterization Jobs Worker (RQ)
+  # ======================
+  clusterization_jobs_worker:
+    build:
+      context: .
+      dockerfile: ./src/jobs/Dockerfile.clusterization_worker
+    container_name: clusterization_jobs_worker
+    env_file:
+      - .env
+    environment:
+      - DB_HOST=sales_router_db
+      - DB_PORT=5432
+    depends_on:
+      - redis
+      - sales_router_db
+      - sales_clusterization
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+      - ./output:/app/output
+    networks:
+      - sales_router_net
+    restart: always
+
+  # ======================
+  # Routing Jobs Worker (RQ)
+  # ======================
+  routing_jobs_worker:
+    build:
+      context: .
+      dockerfile: ./src/jobs/Dockerfile.routing_worker
+    container_name: routing_jobs_worker
+    env_file:
+      - .env
+    environment:
+      - DB_HOST=sales_router_db
+      - DB_PORT=5432
+    depends_on:
+      - redis
+      - sales_router_db
+      - sales_routing
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+      - ./output:/app/output
+    networks:
+      - sales_router_net
+    restart: always
+
+  # ======================
+  # Routing Subjobs Worker (RQ)
+  # ======================
+  routing_subjobs_worker:
+    build:
+      context: .
+      dockerfile: ./src/jobs/Dockerfile.routing_subjobs_worker
+    env_file:
+      - .env
+    environment:
+      - DB_HOST=sales_router_db
+      - DB_PORT=5432
+    depends_on:
+      - redis
+      - sales_router_db
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+      - ./output:/app/output
+    networks:
+      - sales_router_net
+    command: >
+      sh -c "rq worker -u redis://redis:6379/0 routing_subjobs"
+    restart: always
+
+  worker_mkp_base: &worker_mkp_base
+    build:
+      context: .
+      dockerfile: ./src/mkp_preprocessing/Dockerfile.mkp_worker
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      GMAPS_API_KEY: ${GMAPS_API_KEY}
+    depends_on:
+      - redis
+      - sales_router_db
+    volumes:
+      - ./src:/app/src
+      - ./data:/app/data
+      - ./output:/app/output
+    networks:
+      - sales_router_net
+    restart: always
+
+  worker_mkp_1:
+    <<: *worker_mkp_base
+   
+    command: ["mkp_geocode"]
+
+  worker_mkp_2:
+    <<: *worker_mkp_base
+    
+    command: ["mkp_geocode"]
+
+  worker_mkp_3:
+    <<: *worker_mkp_base
+    
+    command: ["mkp_geocode"]
+
+  worker_mkp_master_finalize:
+    <<: *worker_mkp_base
+    container_name: worker_mkp_master_finalize
+    command: ["mkp_master_finalize"]
+
+  worker_mkp_master:
+    <<: *worker_mkp_base
+    container_name: worker_mkp_master
+    command: ["mkp_master"]
+
+  sales_router_frontend:
+    build:
+      context: ../sales_router_frontend
+      dockerfile: Dockerfile
+      target: dev             # <-- usa o stage DEV
+    container_name: sales_router_frontend
+    env_file:
+      - ../sales_router_frontend/.env.local
+    command: npm run dev      # <-- ativa hot reload
+    ports:
+      - "3100:3000"
+    volumes:
+      - ../sales_router_frontend:/app
+      - /app/node_modules     # evita conflito do host
+    networks:
+      - sales_router_net
+    restart: always
+
+
+
+# ======================
+# Volumes persistentes
+# ======================
+volumes:
+  pg_data:
+
+# ======================
+# Rede compartilhada
+# ======================
+networks:
+  sales_router_net:
+    name: sales_router_net
+    driver: bridge

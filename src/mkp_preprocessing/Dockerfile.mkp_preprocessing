@@ -1,0 +1,32 @@
+#mkp_router/src/mkp_preprocessing/Dockerfile.mkp_preprocessing
+
+# Imagem base compartilhada
+FROM psilas85/mkprouter-base:latest
+
+# Diretório de trabalho
+WORKDIR /app
+
+# Copia o código-fonte da aplicação
+COPY ./src /app/src
+
+# Copia e instala dependências globais
+COPY ./requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+# Variáveis de ambiente padrão
+ENV PYTHONPATH=/app/src \
+    TZ=America/Sao_Paulo \
+    ENV=production \
+    AUTH_SERVICE_URL=http://authentication_service:8000 \
+    LOGURU_LEVEL=INFO
+
+# Exibe informações básicas de debug
+RUN python --version && \
+    echo "🧩 Verificando libs instaladas..." && \
+    pip list | grep -E "fastapi|pandas|psycopg2|rq|redis"
+
+# Porta padrão da API
+EXPOSE 8000
+
+# Comando padrão (executa o servidor FastAPI)
+CMD ["uvicorn", "src.mkp_preprocessing.api.mkp_preprocessing_api:app", "--host", "0.0.0.0", "--port", "8000"]

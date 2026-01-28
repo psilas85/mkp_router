@@ -1,6 +1,6 @@
-# sales_router/src/authentication/infrastructure/tenant_repository.py
+#mkp_router/src/authentication/infrastructure/tenant_repository.py
+from authentication.infrastructure.db_connection import get_connection
 
-from database.db_connection import get_connection
 from authentication.entities.tenant import Tenant
 
 

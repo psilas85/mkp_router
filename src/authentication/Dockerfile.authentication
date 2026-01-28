@@ -1,14 +1,12 @@
-# ============================
-# 🚀 Dockerfile.authentication (SalesRouter Auth Service)
-# ============================
+#mkp_router/src/authentication/Dockerfile.authentication
 
-# 1️⃣ Imagem base leve e estável
+# 1️⃣ Imagem base
 FROM python:3.11-slim-bullseye
 
 # 2️⃣ Diretório de trabalho
-WORKDIR /app/authentication
+WORKDIR /app
 
-# 3️⃣ Variáveis de ambiente principais
+# 3️⃣ Variáveis
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app \
@@ -24,20 +22,14 @@ RUN apt-get update && apt-get install -y \
     tzdata \
     && rm -rf /var/lib/apt/lists/*
 
-# 5️⃣ Copia e instala dependências Python
+# 5️⃣ Dependências Python
 COPY ./requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt && \
+    pip install --no-cache-dir fastapi uvicorn bcrypt PyJWT psycopg2-binary loguru==0.7.2
 
-# 6️⃣ Instala libs críticas específicas de autenticação
-RUN pip install --no-cache-dir fastapi uvicorn bcrypt PyJWT psycopg2-binary loguru==0.7.2
+# 🔥 ISSO FALTAVA
+COPY ./src/authentication /app/authentication
 
-# 8️⃣ Porta padrão e startup
 EXPOSE 8000
 
-# 9️⃣ Log básico e inicialização
-RUN python --version && \
-    echo "🔐 Auth Service pronto. Dependências principais:" && \
-    pip list | grep -E "fastapi|bcrypt|PyJWT|psycopg2|loguru"
-
-# 🔟 Comando principal
 CMD ["uvicorn", "authentication.api.authentication_api:app", "--host", "0.0.0.0", "--port", "8000"]

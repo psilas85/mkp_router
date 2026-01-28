@@ -1,13 +1,15 @@
-#sales_router/src/authentication/infrastructure/db_connection.py
+#mkp_router/src/authentication/infrastructure/db_connection.py
 
 import psycopg2
 import os
 
 def get_connection():
     return psycopg2.connect(
-        dbname="sales_routing_db",
-        user="postgres",
-        password="postgres",
-        host="sales_router_db",
-        port="5432"
+        dbname=os.getenv("DB_NAME"),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD"),
+        host=os.getenv("DB_HOST"),
+        port=os.getenv("DB_PORT", "5432"),
     )
+
+

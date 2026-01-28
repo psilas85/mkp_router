@@ -1,8 +1,5 @@
-#sales_router/Dockerfile.base
+#mkp_router/Dockerfile.base
 
-# ======================
-# Imagem base - Sales Router
-# ======================
 FROM python:3.11-slim
 
 # Evita prompts interativos

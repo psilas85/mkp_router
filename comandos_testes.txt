@@ -1,107 +1,31 @@
-curl -X POST "http://localhost/auth/login?email=paulo.silas@igotech.com.br&senha=Admin@2025"
-curl -X POST "http://34.227.175.23/auth/login?email=paulo.silas@igotech.com.br&senha=Psilas@85"
-curl -X POST http://34.227.175.23/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{
-    "email": "paulo.silas@igotech.com.br",
-    "senha": "Psilas@85"
-  }'
 
-🔍  Inspect: https://vercel.com/paulos-projects-745072fe/sales-router-frontend/7zZPVQFbXq2zw5YwEpLkzDbQZ287 [2s]
-✅  Production: https://sales-router-frontend-pyai00f0z-paulos-projects-745072fe.vercel.app [1m]
-🔗  Aliased: https://sales-router-frontend.vercel.app [1m]
-
-docker build -t psilas85/sales_router-base:latest -f Dockerfile.base .
+docker build -t psilas85/mkprouter-base:latest -f Dockerfile.base .
 tree -a -I 'node_modules|.next|dist' -L 20
 
+#preprocessing
+python src/mkp_preprocessing/main_mkp_preprocessing.py   --tenant 1   --arquivo /app/data/mkp_enderecos_picpay_final.xlsx   --descricao "picpay_vitoria_es"
 
-docker exec -it pdv_preprocessing   python3 -m src.pdv_preprocessing.main_pdv_preprocessing   --tenant 1   --arquivo data/pdvs_enderecos.csv   --descricao "SC_10K_251028"
-docker exec -it pdv_preprocessing python3 -m src.pdv_preprocessing.tasks 1 /app/data/pdvs_enderecos.csv "SC_10K_251028"
-docker exec -it pdv_preprocessing python3 -m src.pdv_preprocessing.visualization.pdv_plotting --tenant_id 1 --input_id 491d5430-2de9-451c-9453-c358fb9e4aca --uf RJ
+python src/mkp_preprocessing/scripts/validar_geo_por_input.py   --tenant_id 1   --input_id 74340ae8-545d-4c62-b537-aa0107376feb
 
-docker logs -f pdv_jobs_worker
+python src/mkp_preprocessing/scripts/excluir_geo_invalidos_por_input.py   --tenant_id 1   --input_id 74340ae8-545d-4c62-b537-aa0107376feb
 
+python src/mkp_preprocessing/visualization/mkp_plotting.py   --tenant_id 1   --input_id 74340ae8-545d-4c62-b537-aa0107376feb
 
-docker exec -it clusterization_jobs_worker python3 -m src.jobs.clusterization_jobs   --tenant 1   --uf SP   --usuario paulo  --descricao "SC_10K_251103_SP"  --workday 500 --max_pdv_cluster 250 --input_id 3d698e49-af07-4eab-b8ee-468f13e80fb7  --excluir_outliers 
-docker exec -it sales_clusterization python3 -m src.sales_clusterization.visualization.cluster_plotting   --tenant_id 1   --clusterization_id 54ed2eb3-30c1-413c-824d-e0f5fd5bbadc   --modo_interativo
+#clusterization
+python3 -m mkp_clusterization.cli.run_cluster \
+  --tenant_id 1 \
+  --uf ES \
+  --descricao "teste kmeans_pure tempo_max_15min" \
+  --input_id 012795ea-df80-46e1-8e83-9e25a2fc37a7 \
+  --algo kmeans_pure \
+  --vel 35 \
+  --max_pdv_cluster 20 \
+  --max_iter 10
 
-docker exec -it routing_jobs_worker python3 -m src.jobs.routing_jobs   --tenant 1   --uf SP   --usuario paulo  --descricao "SC_251028_SP"  --clusterization_id 5118b08f-d78c-491d-8ba9-2bb1d4c85d79 --service 20 
-docker exec -it sales_routing python3 -m src.sales_routing.visualization.route_plotting   --tenant 1   --routing_id ee1781f1-9a83-4795-bca4-a6756aec41ec
+  python -m mkp_clusterization.visualization.cluster_plotting \
+  --tenant_id 1 \
+  --clusterization_id 0a3dbac5-9a09-44a7-9070-bc84dc96df51
 
-docker exec -it sales_routing  python3 -m src.sales_routing.cli.run_assign_vendedores   --tenant 1   --uf SP   --usuario paulo  --descricao "SC_251028_SP"  --routing_id ee1781f1-9a83-4795-bca4-a6756aec41ec
-docker exec -it sales_routing  python3 -m src.sales_routing.visualization.plot_vendedores   --tenant 1 --assign_id 8ef90ab1-6295-4cd3-8f35-5d785461745f
-docker exec -it sales_routing  python3 -m src.sales_routing.reporting.export_pdv_vendedor  --tenant 1 --assign_id 8ef90ab1-
-6295-4cd3-8f35-5d785461745f
-docker exec -it sales_routing  python3 -m src.sales_routing.reporting.vendedores_summary_service  --tenant 1 --assign_id 8e
-f90ab1-6295-4cd3-8f35-5d785461745f
-
-docker exec -it sales_routing python3 -m src.sales_routing.reporting.export_cluster_summary   --tenant 1   --routing_id a7cef088-4b21-464b-bf24-a4ee94c2f9ba
-docker exec -it sales_routing python3 -m src.sales_routing.reporting.export_pdvs_por_cluster   --tenant 1   --routing_id 3f19371f-0692-4411-8674-c156e2a1ff6f
-
-docker exec -it sales_clusterization bash -c "
-python3 -m src.sales_clusterization.cli.run_cluster_cep \
-    --tenant 1 \
-    --uf SP \
-    --input_id f7bf5c0d-4c95-41e4-ae5f-0ae0e2f767dd \
-    --descricao 'Clusterização MKP SP_PicPay_20251209' \
-    --velocidade_media 35 \
-    --tempo_max_min 480 \
-    --clientes_target \
-    --ceps_max_cluster 5000 \
-    --excluir_outliers
-"
-docker exec -it sales_clusterization bash -c "
-python3 -m src.sales_clusterization.visualization.mkp_cluster_plotting \
-    --tenant_id 1 \
-    --clusterization_id 8fbe9f27-451e-42b8-be92-9222b87bf2ac \
-    --modo_interativo
-"
-
-docker exec -it sales_clusterization bash -c "
-python3 -m src.sales_clusterization.reporting.export_resumo_clusters_cep \
-    --tenant_id 1 \
-    --clusterization_id 8fbe9f27-451e-42b8-be92-9222b87bf2ac
-"
-
-ubuntu@ip-172-31-16-114:~/sales_router$ docker exec -it sales_clusterization python3 -m src.sales_clusterization.cli.run_cluster
-   --tenant_id 1   --uf RJ   --descricao "SC_2K_rj"   --input_id 7f229750-14ea-4913-bfa8-6eeb448c154b  --dias_uteis 20
-
-docker exec -it sales_clusterization python3 -m src.sales_clusterization.reporting.export_cluster_resumo_xlsx     --tenant_id 1     --clusterization_id 9ef6a8c1-32d4-465e-a123-ca71f092cd1a
-
-docker exec -it sales_clusterization python3 -m src.sales_clusterization.reporting.export_cluster_pdv_detalhado_xlsx \
-    --tenant_id 1 \
-    --clusterization_id 9ef6a8c1-32d4-465e-a123-ca71f092cd1a
-
-docker exec -it sales_clusterization python3 -m src.sales_clusterization.cli.run_cluster_cep_ativa   --tenant 1   --uf SP   --input_id ca582dad-3782-4a89-bb49-0dda00449d8f   --descricao "Clusterização ativa SP - teste inicial"   --velocidade_media 40   --tempo_max_min 15   --centros_csv data/centros_enderecos.csv
-
-docker exec -it sales_clusterization bash -c "python3 -m src.sales_clusterization.visualization.mkp_cluster_plotting \
-    --tenant_id 1 \
-    --clusterization_id 7f3fea67-baed-4663-b6d2-08918c1564fb \
-    --modo_interativo
-"
-
-docker exec -it sales_clusterization bash -c "python3 -m src.sales_clusterization.reporting.export_resumo_clusters_cep \
-    --tenant_id 1 \
-    --clusterization_id 1d4ddf90-4a58-4725-8a4a-3b020c7090b8
-"
-
-Generating public/private ed25519 key pair.
-Enter file in which to save the key (/home/ubuntu/.ssh/id_ed25519): 
-Enter passphrase (empty for no passphrase): 
-Enter same passphrase again: 
-Your identification has been saved in /home/ubuntu/.ssh/id_ed25519
-Your public key has been saved in /home/ubuntu/.ssh/id_ed25519.pub
-The key fingerprint is:
-SHA256:MEViUdXvF75kbAr72pB2HpX1Vkj/yyePX/vhSPawgT4 ec2-salesrouter
-The key's randomart image is:
-+--[ED25519 256]--+
-|      +++...  .  |
-|     . o    .. o |
-|      o      .. +|
-|       o      ..*|
-|        S    .oo=|
-|           .o +Bo|
-|           =oB*=+|
-|          oEB.O==|
-|           o+*.==|
-+----[SHA256]-----+
+  python -m mkp_clusterization.reporting.export_cluster_resumo_xlsx \
+  --tenant_id 1 \
+  --clusterization_id 0a3dbac5-9a09-44a7-9070-bc84dc96df51

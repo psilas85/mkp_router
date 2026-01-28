@@ -1,4 +1,4 @@
-#sales_router/src/database/db_connection.py
+#mkp_router/src/database/db_connection.py
 
 import os
 import time
