@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import List, Dict
 from src.mkp_clusterization.domain.entities import Setor, PDV
 from src.database.db_connection import get_connection
+
 from loguru import logger
 import math
 from sklearn.neighbors import NearestNeighbors
@@ -87,6 +88,80 @@ def criar_run(
     )
     return run_id
 
+# ============================================================
+# 🏭 Persistência de CENTROS (clusterização ativa / balanceada)
+# ============================================================
+def salvar_centros(
+    tenant_id: int,
+    input_id: str,
+    clusterization_id: str,
+    run_id: int,
+    centros: List[Dict],
+) -> Dict[int, int]:
+    """
+    Salva centros utilizados na clusterização.
+    Retorna mapping:
+        cluster_label_original (idx CSV) -> centro_id (DB)
+    """
+
+    if not centros:
+        logger.warning("⚠️ Nenhum centro recebido para salvar_centros()")
+        return {}
+
+    sql = """
+        INSERT INTO cluster_centro (
+            tenant_id,
+            input_id,
+            clusterization_id,
+            run_id,
+            centro_idx,
+            endereco,
+            lat,
+            lon,
+            cnpj,
+            bandeira,
+            origem_geocode
+        )
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        RETURNING id;
+    """
+
+    mapping: Dict[int, int] = {}
+
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            for c in centros:
+                cluster_idx = int(c["cluster_label"])
+
+                cur.execute(
+                    sql,
+                    (
+                        int(tenant_id),
+                        input_id,
+                        clusterization_id,
+                        int(run_id),
+                        cluster_idx,                     # índice original do CSV
+                        c.get("endereco"),
+                        float(c["lat"]),
+                        float(c["lon"]),
+                        c.get("cnpj"),
+                        c.get("bandeira"),
+                        c.get("origem"),
+                    ),
+                )
+
+                centro_id = cur.fetchone()[0]
+                mapping[cluster_idx] = centro_id
+
+            conn.commit()
+
+    logger.info(
+        f"🏭 {len(mapping)} centros persistidos | "
+        f"tenant={tenant_id} | run_id={run_id}"
+    )
+
+    return mapping
+
 
 # ============================================================
 # ✅ Finalização da execução
@@ -123,6 +198,7 @@ def salvar_setores(tenant_id: int, run_id: int, setores: List[Setor]) -> Dict[in
             run_id,
             cluster_label,
             nome,
+            centro_id,
             centro_lat,
             centro_lon,
             n_pdvs,
@@ -133,7 +209,7 @@ def salvar_setores(tenant_id: int, run_id: int, setores: List[Setor]) -> Dict[in
             dist_max_km,
             subclusters
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id;
     """
 
@@ -172,19 +248,36 @@ def salvar_setores(tenant_id: int, run_id: int, setores: List[Setor]) -> Dict[in
                     default=lambda o: float(o)
                 )
 
+                # =========================================================
+                # 📦 Metrics payload (base + extras do Setor)
+                # =========================================================
+                metrics_payload = {
+                    "raio_med_km": raio_med_km,
+                    "raio_p95_km": raio_p95_km,
+                    "tempo_medio_min": tempo_medio_min,
+                    "tempo_max_min": tempo_max_min,
+                    "distancia_media_km": distancia_media_km,
+                    "dist_max_km": dist_max_km,
+                    "subclusters": subclusters,
+                }
+
+                # 🔥 ADD: merge dos extras vindos do CSV dos centros
+                # (cnpj, bandeira, qualquer outro campo futuro)
+                extras = getattr(s, "metrics", None)
+                if isinstance(extras, dict):
+                    for k, v in extras.items():
+                        if v is None:
+                            continue
+                        if isinstance(v, str) and not v.strip():
+                            continue
+                        metrics_payload[k] = v
+
                 metrics_json = json.dumps(
-                    {
-                        "raio_med_km": raio_med_km,
-                        "raio_p95_km": raio_p95_km,
-                        "tempo_medio_min": tempo_medio_min,
-                        "tempo_max_min": tempo_max_min,
-                        "distancia_media_km": distancia_media_km,
-                        "dist_max_km": dist_max_km,
-                        "subclusters": subclusters,
-                    },
+                    metrics_payload,
                     ensure_ascii=False,
-                    default=lambda o: float(o)
+                    default=lambda o: float(o),
                 )
+
 
                 cur.execute(
                     sql,
@@ -193,6 +286,7 @@ def salvar_setores(tenant_id: int, run_id: int, setores: List[Setor]) -> Dict[in
                         int(run_id),
                         cluster_label,
                         f"CL-{cluster_label}",
+                        s.centro_id,
                         centro_lat,
                         centro_lon,
                         n_pdvs,
@@ -587,6 +681,8 @@ class DatabaseWriter:
         except Exception as e:
             import logging
             logging.warning(f"⚠️ Erro ao salvar cache de endereço: {e}")
+
+            
 
 
 # ============================================================

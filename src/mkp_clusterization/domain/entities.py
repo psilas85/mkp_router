@@ -30,21 +30,29 @@ class PDV:
 @dataclass
 class Setor:
     """
-    Representa um setor (cluster geográfico) de PDVs.
-    - Compatível com pipelines de PDV e Marketplace.
-    - Inclui campos opcionais pdvs/coords para avaliação operacional.
+    Representa um setor (cluster geográfico).
+    Centro é entidade própria (cluster_centro).
     """
     cluster_label: int
+
+    # 🔑 RELAÇÃO COM O CENTRO
+    centro_id: int | None
+
+    # 📍 Coordenadas do centro (snapshot)
     centro_lat: float
     centro_lon: float
+
+    # 📊 Métricas principais
     n_pdvs: int
     raio_med_km: float
     raio_p95_km: float
+
+    # 📦 Métricas adicionais / extensíveis
     metrics: Dict[str, float] = field(default_factory=dict)
 
-    # 🔹 Campos opcionais para integração com o refinamento operacional
+    # 🔹 Campos opcionais
     pdvs: Optional[List[PDV]] = None
     coords: Optional[List[tuple]] = None
 
-    # 🔹 Campo hierárquico (para subdivisão interna)
+    # 🔹 Hierarquia interna
     subclusters: List[Dict[str, float]] = field(default_factory=list)

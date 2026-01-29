@@ -16,6 +16,7 @@ from src.mkp_clusterization.infrastructure.persistence.database_writer import (
     salvar_setores,
     salvar_mapeamento_pdvs,
     salvar_outliers,
+    salvar_centros,
 )
 from src.mkp_clusterization.infrastructure.logging.run_logger import snapshot_params
 
@@ -281,15 +282,18 @@ def executar_clusterizacao(
                 centro_lon = float(np.mean([p.lon for p in pdvs_cluster]))
 
                 setores_finais.append(
-                    Setor(
-                        cluster_label=int(cid),
-                        centro_lat=centro_lat,
-                        centro_lon=centro_lon,
-                        n_pdvs=len(pdvs_cluster),
-                        raio_med_km=0.0,
-                        raio_p95_km=0.0,
-                    )
+                    {
+                        "cluster_label": int(cid),
+                        "centro_lat": float(centro_lat),
+                        "centro_lon": float(centro_lon),
+                        "n_pdvs": len(pdvs_cluster),
+                        "raio_med_km": 0.0,
+                        "raio_p95_km": 0.0,
+                        "metrics": {},
+                        "subclusters": [],
+                    }
                 )
+
 
                 for p in pdvs_cluster:
                     p.cluster_label = int(cid)
@@ -388,17 +392,89 @@ def executar_clusterizacao(
         # ============================================================
 
         # 🔑 Normalização única e consistente
-        labels_orig = sorted({s.cluster_label for s in setores_finais})
+        # 🔑 Normalização única e consistente
+        labels_orig = sorted({s["cluster_label"] for s in setores_finais})
+
         mapa = {old: new for new, old in enumerate(labels_orig)}
 
         for s in setores_finais:
-            s.cluster_label = mapa[s.cluster_label]
+            s["cluster_label"] = mapa[s["cluster_label"]]
+
 
         for p in pdvs:
             if p.cluster_label in mapa:
                 p.cluster_label = mapa[p.cluster_label]
 
+        # ============================================================
+        # 🏭 Persistir CENTROS GERADOS (modo normal)
+        # ============================================================
+        def _centro_endereco_placeholder() -> str:
+            partes = []
+            if cidade and str(cidade).strip():
+                partes.append(str(cidade).strip())
+            if uf and str(uf).strip():
+                partes.append(str(uf).strip())
+            sufixo = " - ".join(partes) if partes else "BR"
+            return f"CENTRO GERADO - {sufixo}"
+
+        centros_gerados = []
+        for s in setores_finais:
+            centros_gerados.append(
+                {
+                    "cluster_label": int(s["cluster_label"]),
+                    "lat": float(s["centro_lat"]),
+                    "lon": float(s["centro_lon"]),
+                    "endereco": _centro_endereco_placeholder(),
+                    "origem": "gerado_algoritmo",
+                    "cnpj": None,
+                    "bandeira": None,
+                }
+            )
+
+        centro_id_map = salvar_centros(
+            tenant_id=tenant_id,
+            input_id=input_id,
+            clusterization_id=clusterization_id,
+            run_id=run_id,
+            centros=centros_gerados,
+        )
+
+        # ============================================================
+        # 🧩 Recriar Setores com centro_id (contrato da entidade)
+        # ============================================================
+        setores_ok: List[Setor] = []
+
+        for s in setores_finais:
+            cid = int(s["cluster_label"])
+            centro_id = centro_id_map.get(cid)
+
+            if centro_id is None:
+                raise ValueError(f"centro_id não encontrado para cluster_label={cid}")
+
+            setores_ok.append(
+                Setor(
+                    cluster_label=cid,
+                    centro_id=centro_id,
+                    centro_lat=float(s["centro_lat"]),
+                    centro_lon=float(s["centro_lon"]),
+                    n_pdvs=int(s["n_pdvs"]),
+                    raio_med_km=float(s["raio_med_km"]),
+                    raio_p95_km=float(s["raio_p95_km"]),
+                    metrics=dict(s.get("metrics", {})),
+                    subclusters=list(s.get("subclusters", [])),
+                )
+            )
+
+        setores_finais = setores_ok
+
+
+
+        
+        # ============================================================
+        # 💾 Persistência (setores + mapeamento)
+        # ============================================================
         mapping = salvar_setores(tenant_id, run_id, setores_finais)
+
 
         for p in pdvs:
             p.cluster_id = mapping[p.cluster_label]

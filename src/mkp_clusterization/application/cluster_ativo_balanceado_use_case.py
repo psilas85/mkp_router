@@ -14,7 +14,7 @@ from src.mkp_clusterization.domain.centers_geolocation_service import CentersGeo
 from src.mkp_clusterization.domain.pdv_cluster_balanceador import balancear_clusters_pdv
 from src.database.db_connection import get_connection
 from src.mkp_clusterization.domain.metrics_calculator import calcular_metricas_cluster
-
+from src.mkp_clusterization.infrastructure.persistence.database_writer import salvar_centros
 
 from src.mkp_clusterization.infrastructure.persistence.database_reader import (
     carregar_pdvs,
@@ -58,6 +58,7 @@ class ClusterAtivoBalanceadoUseCase:
         tempo_max_min: int,
         v_kmh: float = 35.0,
         max_iter: int = 10,
+        clusterization_id: str | None = None,
     ):
         self.tenant_id = tenant_id
         self.uf = uf
@@ -71,8 +72,8 @@ class ClusterAtivoBalanceadoUseCase:
         self.v_kmh = v_kmh
         self.max_iter = max_iter
 
-        self.clusterization_id = str(uuid.uuid4())
-    
+        # 🔥 FONTE ÚNICA DE VERDADE
+        self.clusterization_id = clusterization_id or str(uuid.uuid4())
 
         self.conn = get_connection()
         self.reader = DatabaseReader(self.conn)
@@ -150,6 +151,22 @@ class ClusterAtivoBalanceadoUseCase:
             input_id=self.input_id,
             clusterization_id=self.clusterization_id,
         )
+
+        # ============================================================
+        # 3.1) Persistir CENTROS como entidade
+        # ============================================================
+        centro_id_map = salvar_centros(
+            tenant_id=self.tenant_id,
+            input_id=self.input_id,
+            clusterization_id=self.clusterization_id,
+            run_id=run_id,
+            centros=centros,
+        )
+
+        # injeta centro_id nos centros em memória
+        for c in centros:
+            c["centro_id"] = centro_id_map.get(int(c["cluster_label"]))
+
 
         try:
             # ============================================================
@@ -236,64 +253,149 @@ class ClusterAtivoBalanceadoUseCase:
         if not os.path.exists(self.centros_csv):
             raise FileNotFoundError(self.centros_csv)
 
-        df = pd.read_csv(self.centros_csv, sep=None, engine="python")
+        # ============================================================
+        # 1) Leitura do arquivo (XLSX ou CSV)
+        # ============================================================
+        ext = os.path.splitext(self.centros_csv)[1].lower()
+
+        if ext == ".xlsx":
+            df = pd.read_excel(self.centros_csv)
+        elif ext == ".csv":
+            df = pd.read_csv(self.centros_csv, sep=None, engine="python")
+        else:
+            raise ValueError("Formato inválido. Use .xlsx ou .csv")
+
+        # ============================================================
+        # 2) Normalização de colunas
+        # ============================================================
         df.columns = [c.strip().lower() for c in df.columns]
 
+        df = df.rename(columns={
+            "bandeira cliente": "bandeira",
+            "bandeira_cliente": "bandeira",
+            "cnpj": "cnpj",
+            "razao": "razao_social",
+        })
+
+        # ============================================================
+        # 3) Validação mínima de schema (fail fast)
+        # ============================================================
+        obrigatorias = ["logradouro", "bairro", "cidade", "uf"]
+        faltantes = [c for c in obrigatorias if c not in df.columns]
+        if faltantes:
+            raise ValueError(f"Colunas obrigatórias ausentes no arquivo de centros: {faltantes}")
+
+        # garante colunas opcionais
+        for c in ["numero", "cep", "cnpj", "bandeira"]:
+            if c not in df.columns:
+                df[c] = ""
+
+        # ============================================================
+        # 4) Helpers
+        # ============================================================
         def limpar(v):
             if pd.isna(v):
                 return ""
             return re.sub(r"\s+", " ", str(v).strip())
 
-        if "endereco" in df.columns:
-            df["endereco_full"] = df["endereco"].apply(limpar)
-        else:
-            for c in ["logradouro", "numero", "bairro", "cidade", "uf", "cep"]:
-                if c not in df.columns:
-                    df[c] = ""
+        def separar_numero(v):
+            if not v:
+                return "", None
+            v = str(v).strip()
+            m = re.search(r"(.*?)[, ]+(\d+[A-Za-z\-\/]*)$", v)
+            if m:
+                return m.group(1).strip(), m.group(2).strip()
+            return v, None
 
-            def montar(r):
-                cidade = limpar(r["cidade"]) or (self.cidade or "")
-                uf = limpar(r["uf"]) or (self.uf or "")
-                partes = [
-                    limpar(r["logradouro"]),
-                    limpar(r["numero"]),
-                    limpar(r["bairro"]),
-                    cidade,
-                    uf,
-                    limpar(r["cep"]),
-                ]
-                return " - ".join([p for p in partes if p])
+        # normalizações básicas
+        df["uf"] = df["uf"].astype(str).str.strip().str.upper()
+        df["cidade"] = df["cidade"].astype(str).str.strip()
+        df["bairro"] = df["bairro"].astype(str).str.strip()
 
-            df["endereco_full"] = df.apply(montar, axis=1)
+        # ============================================================
+        # 5) Montagem do endereço completo
+        # ============================================================
+        def montar_endereco(r):
+            logradouro = limpar(r["logradouro"])
+            numero = limpar(r["numero"])
 
+            # tenta extrair número do logradouro se vier tudo junto
+            if not numero:
+                logradouro, numero_extraido = separar_numero(logradouro)
+                if numero_extraido:
+                    numero = numero_extraido
+
+            cidade = limpar(r["cidade"]) or (self.cidade or "")
+            uf = limpar(r["uf"]) or (self.uf or "")
+
+            # regra mínima de validade
+            if not logradouro or not cidade or not uf:
+                return ""
+
+            partes = [
+                logradouro,
+                numero,
+                limpar(r["bairro"]),
+                cidade,
+                uf,
+                limpar(r["cep"]),
+            ]
+
+            return " - ".join([p for p in partes if p])
+
+        df["endereco_full"] = df.apply(montar_endereco, axis=1)
         df["endereco_full"] = df["endereco_full"].str.strip()
-        df = df[df["endereco_full"].str.len() > 5].copy()
+
+        # descarta endereços inválidos
+        df = df[df["endereco_full"].str.len() > 10].copy()
         df = df.drop_duplicates(subset=["endereco_full"])
 
-        centros = []
+        # ============================================================
+        # 6) Geocodificação + montagem dos centros
+        # ============================================================
+        centros: List[Dict[str, Any]] = []
+
         for _, r in df.iterrows():
-            lat, lon, origem = self.centros_geo.buscar(r["endereco_full"])
+            endereco = r["endereco_full"]
+
+            lat, lon, origem = self.centros_geo.buscar(endereco)
             if lat is None or lon is None:
                 continue
+
+            cnpj = limpar(r.get("cnpj"))
+            cnpj = re.sub(r"\D", "", cnpj)
+
+            bandeira = limpar(r.get("bandeira"))
+
             centros.append(
                 {
                     "cluster_label": len(centros),
                     "lat": float(lat),
                     "lon": float(lon),
-                    "endereco": r["endereco_full"],
+                    "endereco": endereco,
                     "origem": origem,
+                    "cnpj": cnpj,
+                    "bandeira": bandeira,
                 }
             )
 
-        # dedupe por lat/lon
-        uniq = {}
+        # ============================================================
+        # 7) Deduplicação por coordenada
+        # ============================================================
+        uniq: Dict[tuple, Dict[str, Any]] = {}
         for c in centros:
             k = (round(c["lat"], 6), round(c["lon"], 6))
             if k not in uniq:
                 uniq[k] = c
+            else:
+                logger.warning(
+                    f"Centro duplicado por coordenada ignorado | "
+                    f"cnpj={c.get('cnpj')} bandeira={c.get('bandeira')}"
+                )
 
         centros = list(uniq.values())
 
+        # reindexa labels
         for i, c in enumerate(centros):
             c["cluster_label"] = i
 
@@ -330,6 +432,7 @@ class ClusterAtivoBalanceadoUseCase:
             setores.append(
                 Setor(
                     cluster_label=label,
+                    centro_id=c.get("centro_id"), 
                     centro_lat=c["lat"],
                     centro_lon=c["lon"],
                     n_pdvs=len(pdvs_cluster),
@@ -340,7 +443,10 @@ class ClusterAtivoBalanceadoUseCase:
                         "dist_max_km": metricas["dist_max_km"],
                         "tempo_medio_min": metricas["tempo_medio_min"],
                         "tempo_max_min": metricas["tempo_max_min"],
+                        "cnpj": c.get("cnpj"),
+                        "bandeira": c.get("bandeira"),
                     },
+
                     subclusters=[],  # mantém compatível
                 )
             )

@@ -6,20 +6,21 @@ import os
 import argparse
 import pandas as pd
 from loguru import logger
+
 from database.db_connection import get_connection
 from mkp_clusterization.domain.haversine_utils import haversine
 from mkp_clusterization.domain.reverse_geocode_utils import enrich_centros_reverse
 
-VELOCIDADE_MEDIA_KMH = 30.0  # regra executiva fixa
+VELOCIDADE_MEDIA_KMH = 35.0  # alinhado com clusterização
 
 
 # =========================================================
-# 🧮 Métricas geométricas por cluster
+# 🧮 Métricas geométricas reais por cluster (PDV → centro)
 # =========================================================
 def calcular_metricas_por_cluster(df_pdvs: pd.DataFrame) -> pd.DataFrame:
     registros = []
 
-    for cluster_label, g in df_pdvs.groupby("cluster_label"):
+    for cluster_id, g in df_pdvs.groupby("cluster_id"):
         distancias = []
 
         for _, row in g.iterrows():
@@ -40,9 +41,7 @@ def calcular_metricas_por_cluster(df_pdvs: pd.DataFrame) -> pd.DataFrame:
 
         registros.append(
             {
-                "cluster_label": cluster_label,
-                "enderecos": g["pdv_id"].nunique(),
-                "qde_clientes": g["pdv_vendas"].sum(),
+                "cluster_id": cluster_id,
                 "dist_media_km": round(dist_media, 2),
                 "dist_max_km": round(dist_max, 2),
                 "tempo_medio_min": round(tempo_medio, 1),
@@ -51,7 +50,6 @@ def calcular_metricas_por_cluster(df_pdvs: pd.DataFrame) -> pd.DataFrame:
         )
 
     return pd.DataFrame(registros)
-
 
 
 # =========================================================
@@ -67,15 +65,17 @@ def exportar_cluster_resumo(tenant_id: int, clusterization_id: str):
     # =========================================================
     # 🔍 Run mais recente
     # =========================================================
-    query_run = f"""
+    run_df = pd.read_sql_query(
+        f"""
         SELECT id AS run_id
         FROM cluster_run
         WHERE tenant_id = {tenant_id}
           AND clusterization_id = '{clusterization_id}'
         ORDER BY criado_em DESC
         LIMIT 1;
-    """
-    run_df = pd.read_sql_query(query_run, conn)
+        """,
+        conn,
+    )
 
     if run_df.empty:
         conn.close()
@@ -84,86 +84,147 @@ def exportar_cluster_resumo(tenant_id: int, clusterization_id: str):
     run_id = int(run_df.iloc[0]["run_id"])
 
     # =========================================================
-    # 📊 View resumo (base executiva)
+    # 📊 Resumo base (metrics = fonte de verdade)
     # =========================================================
-    query_resumo = f"""
-        SELECT *
-        FROM v_cluster_resumo
-        WHERE tenant_id = {tenant_id}
-          AND run_id = {run_id}
-        ORDER BY cluster_label;
-    """
-    df = pd.read_sql_query(query_resumo, conn)
+    df = pd.read_sql_query(
+        f"""
+        SELECT
+            cs.id AS cluster_id,
+            cs.cluster_label,
+            cs.n_pdvs AS enderecos,
+
+            (cs.metrics->>'tempo_medio_min')::float     AS tempo_medio_min,
+            (cs.metrics->>'tempo_max_min')::float       AS tempo_max_min,
+            (cs.metrics->>'distancia_media_km')::float  AS distancia_media_km,
+            (cs.metrics->>'dist_max_km')::float          AS dist_max_km,
+
+            cs.centro_lat,
+            cs.centro_lon,
+
+            cc.endereco AS endereco_centro,
+            cc.cnpj     AS cnpj_centro,
+            cc.bandeira,
+            cc.origem_geocode                -- 👈 ESSENCIAL
+
+        FROM cluster_setor cs
+        JOIN cluster_centro cc
+        ON cc.id = cs.centro_id
+        WHERE cs.tenant_id = {tenant_id}
+        AND cs.run_id = {run_id}
+        ORDER BY cs.cluster_label;
+
+        """,
+        conn,
+    )
 
     if df.empty:
         conn.close()
-        raise ValueError("❌ Nenhum dado encontrado em v_cluster_resumo")
+        raise ValueError("❌ Nenhum setor encontrado")
 
     # =========================================================
-    # 📍 PDVs por cluster (para cálculo geométrico)
+    # 📍 PDVs (fonte real para métricas geométricas)
     # =========================================================
-    query_pdvs = f"""
+    df_pdvs = pd.read_sql_query(
+        f"""
         SELECT
-            cs.cluster_label,
+            cs.id AS cluster_id,
             cs.centro_lat,
             cs.centro_lon,
             p.id AS pdv_id,
             p.pdv_lat,
             p.pdv_lon,
-            COALESCE(p.pdv_vendas, 0) AS pdv_vendas
+            p.pdv_vendas
         FROM cluster_setor cs
         JOIN cluster_setor_pdv csp
-            ON csp.cluster_id = cs.id
-           AND csp.tenant_id = cs.tenant_id
+          ON csp.cluster_id = cs.id
+         AND csp.tenant_id = cs.tenant_id
         JOIN pdvs p
-            ON p.id = csp.pdv_id
-           AND p.tenant_id = cs.tenant_id
+          ON p.id = csp.pdv_id
+         AND p.tenant_id = cs.tenant_id
         WHERE cs.run_id = {run_id}
           AND cs.tenant_id = {tenant_id}
           AND p.pdv_lat IS NOT NULL
           AND p.pdv_lon IS NOT NULL;
-    """
-    df_pdvs = pd.read_sql_query(query_pdvs, conn)
-    conn.close()
-
-    if df_pdvs.empty:
-        raise ValueError("❌ Nenhum PDV encontrado para cálculo de métricas")
-
-    # =========================================================
-    # 🧮 Cálculo geométrico
-    # =========================================================
-    df_calc = calcular_metricas_por_cluster(df_pdvs)
-
-    df = df.merge(df_calc, on="cluster_label", how="left", suffixes=("", "_calc"))
-
-    for col in [
-        "dist_media_km",
-        "dist_max_km",
-        "tempo_medio_min",
-        "tempo_max_min",
-    ]:
-        df[col] = df[f"{col}_calc"].fillna(df[col])
-
-    df = df.drop(columns=[c for c in df.columns if c.endswith("_calc")], errors="ignore")
-
-    # =========================================================
-    # 🧹 Limpeza técnica
-    # =========================================================
-    df = df.drop(columns=["metrics_json"], errors="ignore")
-
-    # =========================================================
-    # 🧭 Reverse geocode dos centros
-    # =========================================================
-    df_geo = enrich_centros_reverse(df)
-    df = df.merge(df_geo, on=["centro_lat", "centro_lon"], how="left")
-    df = df.rename(
-        columns={
-            "Endereco centro": "Logradouro / Bairro",
-            "Cidade centro": "Cidade",
-            "UF centro": "UF",
-            "CEP centro": "CEP",
-        }
+        """,
+        conn,
     )
+
+    conn.close()
+    
+    # =========================================================
+    # 💰 Vendas por cluster (soma PDVs)
+    # =========================================================
+    if "pdv_vendas" in df_pdvs.columns:
+        df_vendas = (
+            df_pdvs
+            .groupby("cluster_id", as_index=False)["pdv_vendas"]
+            .sum()
+            .rename(columns={"pdv_vendas": "Vendas PDVs"})
+        )
+
+        df = df.merge(df_vendas, on="cluster_id", how="left")
+        df["Vendas PDVs"] = df["Vendas PDVs"].fillna(0)
+    else:
+        df["Vendas PDVs"] = 0
+
+    # =======================================================
+    # 🧮 Recalcular métricas reais (override seguro)
+    # =========================================================
+    if not df_pdvs.empty:
+        df_calc = calcular_metricas_por_cluster(df_pdvs)
+
+        df = df.merge(
+            df_calc,
+            on="cluster_id",
+            how="left",
+            suffixes=("", "_calc"),
+        )
+
+        for col in [
+            "dist_media_km",
+            "dist_max_km",
+            "tempo_medio_min",
+            "tempo_max_min",
+        ]:
+            col_calc = f"{col}_calc"
+            if col_calc in df.columns:
+                df[col] = df[col_calc].fillna(df[col])
+
+        df.drop(columns=[c for c in df.columns if c.endswith("_calc")], inplace=True)
+
+    # =========================================================
+    # 🧭 Reverse geocode — REGRA CORRETA
+    # =========================================================
+    if "origem_geocode" in df.columns:
+        precisa_reverse = df["origem_geocode"].isin(
+            ["gerado_algoritmo", "kmeans", "auto"]
+        ).any()
+    else:
+        # fallback defensivo (nunca deveria acontecer)
+        precisa_reverse = True
+
+    if precisa_reverse:
+        logger.info("🧭 Reverse geocode aplicado (modo normal)")
+        mask_reverse = df["origem_geocode"].isin(["gerado_algoritmo", "kmeans", "auto"])
+        df_geo = enrich_centros_reverse(df[mask_reverse])
+
+        df = df.merge(
+            df_geo,
+            on=["centro_lat", "centro_lon"],
+            how="left",
+        )
+
+        # Garantia defensiva de colunas pós-reverse
+        for col in ["Endereco centro", "Cidade centro", "UF centro"]:
+            if col not in df.columns:
+                df[col] = ""
+
+
+    else:
+        logger.info("ℹ️ Reverse ignorado (ativo_balanceado)")
+        df["Endereco centro"] = df["endereco_centro"]
+        df["Cidade centro"] = ""
+        df["UF centro"] = ""
 
 
     # =========================================================
@@ -173,32 +234,33 @@ def exportar_cluster_resumo(tenant_id: int, clusterization_id: str):
         columns={
             "cluster_label": "Cluster",
             "enderecos": "Endereços",
-            "qde_clientes": "Qde de Clientes",
+            "Vendas PDVs": "Vendas PDVs",
+            "cnpj_centro": "CNPJ Centro",
+            "bandeira": "Bandeira",
             "dist_media_km": "Distância média (km)",
             "dist_max_km": "Distância máxima (km)",
             "tempo_medio_min": "Tempo médio (min)",
             "tempo_max_min": "Tempo máximo (min)",
+            "Endereco centro": "Endereço do Centro",
+            "Cidade centro": "Cidade",
+            "UF centro": "UF",
             "centro_lat": "Latitude centro",
             "centro_lon": "Longitude centro",
         }
     )
 
-
-    # =========================================================
-    # 📐 Ordem final (CEP removido)
-    # =========================================================
-    df = df.drop(columns=["CEP"], errors="ignore")
-
     df = df[
         [
             "Cluster",
             "Endereços",
-            "Qde de Clientes",
+            "Vendas PDVs",
+            "CNPJ Centro",
+            "Bandeira",
             "Distância média (km)",
             "Distância máxima (km)",
             "Tempo médio (min)",
             "Tempo máximo (min)",
-            "Logradouro / Bairro",
+            "Endereço do Centro",
             "Cidade",
             "UF",
             "Latitude centro",
@@ -207,49 +269,20 @@ def exportar_cluster_resumo(tenant_id: int, clusterization_id: str):
     ]
 
     # =========================================================
-    # 📤 Exportação Excel
+    # 📤 Excel (SaaS-ready)
     # =========================================================
     output_dir = f"output/reports/{tenant_id}"
     os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(
-        output_dir, f"cluster_resumo_{clusterization_id}.xlsx"
-    )
 
-    from openpyxl.styles import Font, Alignment
-    from openpyxl.utils import get_column_letter
+    output_path = os.path.join(
+        output_dir,
+        f"cluster_resumo_{clusterization_id}.xlsx",
+    )
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="Resumo por Cluster", index=False)
-        ws = writer.book["Resumo por Cluster"]
 
-        ws.freeze_panes = "A2"
-
-        header_font = Font(bold=True)
-        header_align = Alignment(horizontal="center", vertical="center")
-
-        for cell in ws[1]:
-            cell.font = header_font
-            cell.alignment = header_align
-
-        widths = {
-            1: 10,
-            2: 8,
-            3: 10,
-            4: 22,
-            5: 24,
-            6: 20,
-            7: 20,
-            8: 40,  # Logradouro / Bairro
-            9: 20,  # Cidade
-            10: 6,  # UF
-            11: 18,
-            12: 18,
-        }
-
-        for col_idx, width in widths.items():
-            ws.column_dimensions[get_column_letter(col_idx)].width = width
-
-    logger.success(f"✅ Excel executivo gerado: {output_path}")
+    logger.success(f"✅ Excel gerado: {output_path}")
 
 
 # =========================================================

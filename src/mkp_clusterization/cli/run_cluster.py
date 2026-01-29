@@ -70,14 +70,13 @@ def main():
     parser.add_argument("--vel", type=float, default=35.0)
 
     # ============================================================
-    # 🔥 NOVO PADRÃO — tempo máximo por cluster (CEP-like)
-    # Usado no kmeans_pure
+    # 🔥 tempo máximo por cluster (CEP-like)
     # ============================================================
     parser.add_argument(
         "--tempo_max_min",
         type=int,
         default=15,
-        help="Tempo máximo (min) do centro do cluster até o PDV (kmeans_pure)"
+        help="Tempo máximo (min) do centro do cluster até o PDV"
     )
 
     # ============================================================
@@ -85,7 +84,6 @@ def main():
     # ============================================================
     parser.add_argument("--centros_csv", help="CSV com endereços dos centros")
     parser.add_argument("--min_pdv", type=int, help="Mínimo de PDVs por centro")
-
 
     # ============================================================
     # Gerais
@@ -128,24 +126,11 @@ def main():
     logger.info(f"⏱️ tempo_max_min     = {args.tempo_max_min} min")
 
     logger.info("----- Parâmetros -----")
-
-    if args.algo == "kmeans":
-        logger.info(f"🗓️ dias_uteis         = {args.dias_uteis}")
-        logger.info(f"🔁 freq               = {args.freq}")
-        logger.info(f"⏱️ jornada (min)      = {args.workday}")
-        logger.info(f"🛣️ rota máx (km)      = {args.routekm}")
-        logger.info(f"⚒ tempo serviço (min)= {args.service}")
-        logger.info(f"🚚 velocidade (km/h)  = {args.vel}")
-
-    # 🔴 ADICIONAR ESTE BLOCO
-    if args.algo == "kmeans_pure":
-        logger.info(f"⏱️ tempo_max_min      = {args.tempo_max_min}")
-
     logger.info(f"🔢 max_pdv_cluster    = {args.max_pdv_cluster}")
     logger.info(f"🔧 max_iter           = {args.max_iter}")
     logger.info(f"🧹 excluir_outliers   = {args.excluir_outliers}")
     logger.info(f"📏 z_thresh           = {args.z_thresh}")
-
+    logger.info(f"🚚 velocidade (km/h)  = {args.vel}")
 
     # ============================================================
     # Execução
@@ -173,6 +158,7 @@ def main():
             tempo_max_min=args.tempo_max_min,
             v_kmh=args.vel,
             max_iter=args.max_iter,
+            clusterization_id=clusterization_id,   # 🔥 CONSISTENTE
         )
 
         result = use_case.execute()
@@ -198,7 +184,6 @@ def main():
             z_thresh=args.z_thresh,
             max_iter=args.max_iter,
         )
-
 
     print("\n=== RESULTADO FINAL ===")
     for campo in ("clusterization_id", "run_id", "k_final", "n_pdvs"):

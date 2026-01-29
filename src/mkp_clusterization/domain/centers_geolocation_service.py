@@ -1,4 +1,6 @@
 #mkp_router/src/mkp_clusterization/domain/centers_geolocation_service.py
+
+import os
 import requests
 from loguru import logger
 from mkp_preprocessing.domain.utils_geo import coordenada_generica
@@ -11,7 +13,12 @@ class CentersGeolocationService:
         self.writer = writer
         self.google_key = google_key
         self.timeout = timeout
-        self.NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+
+        # usa Nominatim local da EC2
+        self.NOMINATIM_URL = os.getenv(
+            "NOMINATIM_LOCAL_URL",
+            "http://localhost:8080"
+        ).rstrip("/") + "/search"
 
     # ============================================================
     # 🔎 Busca principal
@@ -27,13 +34,13 @@ class CentersGeolocationService:
         if lat and lon and not coordenada_generica(lat, lon):
             return lat, lon, "cache"
 
-        # 2) NOMINATIM
-        lat, lon = self._buscar_nominatim(endereco)
+        # 2) NOMINATIM LOCAL
+        lat, lon = self._buscar_nominatim_local(endereco)
         if lat and lon and not coordenada_generica(lat, lon):
-            self._salvar_cache(endereco, lat, lon, origem="nominatim")
-            return lat, lon, "nominatim"
+            self._salvar_cache(endereco, lat, lon, origem="nominatim_local")
+            return lat, lon, "nominatim_local"
 
-        # 3) GOOGLE
+        # 3) GOOGLE (opcional)
         if self.google_key:
             lat, lon = self._buscar_google(endereco)
             if lat and lon and not coordenada_generica(lat, lon):
@@ -62,25 +69,52 @@ class CentersGeolocationService:
             logger.error(f"❌ Falha salvando no cache: {e}")
 
     # ============================================================
-    # 🌍 NOMINATIM
+    # 🌍 NOMINATIM LOCAL (EC2)
     # ============================================================
-    def _buscar_nominatim(self, endereco):
+    def _buscar_nominatim_local(self, endereco):
         try:
             params = {
                 "q": endereco,
                 "format": "json",
                 "countrycodes": "br",
                 "addressdetails": 1,
+                "limit": 1,
             }
-            headers = {"User-Agent": "SalesRouter-Geocoder/1.0"}
 
-            r = requests.get(self.NOMINATIM_URL, params=params, headers=headers, timeout=self.timeout)
+            headers = {
+                "User-Agent": "mkp-router/1.0 (contato@mkprouter.com)"
+            }
 
-            if r.status_code == 200 and r.json():
-                item = r.json()[0]
-                return float(item["lat"]), float(item["lon"])
+            r = requests.get(
+                self.NOMINATIM_URL,
+                params=params,
+                headers=headers,
+                timeout=self.timeout,
+            )
+
+            if r.status_code != 200:
+                return None, None
+
+            dados = r.json()
+            if not dados:
+                return None, None
+
+            item = dados[0]
+
+            # validação mínima de UF (se existir)
+            address = item.get("address", {})
+            state = address.get("state", "").lower()
+            state_code = address.get("state_code", "").upper()
+
+            # se o endereço menciona SP e o resultado não é SP, rejeita
+            if " sp" in endereco.lower() or endereco.lower().endswith("- sp"):
+                if state_code and state_code != "SP":
+                    return None, None
+
+            return float(item["lat"]), float(item["lon"])
+
         except Exception as e:
-            logger.warning(f"⚠️ Erro Nominatim: {e}")
+            logger.warning(f"⚠️ Erro Nominatim local: {e}")
 
         return None, None
 
