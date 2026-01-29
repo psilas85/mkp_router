@@ -1,8 +1,7 @@
-#sales_router/src/sales_clusterization/domain/centers_geolocation_service.py
-
+#mkp_router/src/mkp_clusterization/domain/centers_geolocation_service.py
 import requests
 from loguru import logger
-from pdv_preprocessing.domain.utils_geo import coordenada_generica
+from mkp_preprocessing.domain.utils_geo import coordenada_generica
 
 
 class CentersGeolocationService:

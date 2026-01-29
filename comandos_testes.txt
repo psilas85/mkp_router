@@ -22,6 +22,8 @@ python3 -m mkp_clusterization.cli.run_cluster \
   --max_pdv_cluster 20 \
   --max_iter 10
 
+  python -m src.mkp_clusterization.cli.run_cluster   --tenant_id 1   --uf SP   --descricao "ativo balanceado teste"   --input_id b961000e-3dd1-462d-98e5-2ccc1f8ab19b   --algo ativo_balanceado   --centros_csv /app/data/centros_enderecos_redes.csv   --min_pdv 5   --max_pdv 20   --tempo_max_min 15   --vel 35   --max_iter 10
+
   python -m mkp_clusterization.visualization.cluster_plotting \
   --tenant_id 1 \
   --clusterization_id 0a3dbac5-9a09-44a7-9070-bc84dc96df51

@@ -159,10 +159,11 @@ def salvar_setores(tenant_id: int, run_id: int, setores: List[Setor]) -> Dict[in
                     distancia_media_km = float(np.mean(distancias)) if distancias else 0.0
                     dist_max_km = float(np.max(distancias)) if distancias else 0.0
                 else:
-                    tempo_medio_min = float(getattr(s, "tempo_medio_min", 0.0))
-                    tempo_max_min = float(getattr(s, "tempo_max_min", 0.0))
-                    distancia_media_km = float(getattr(s, "distancia_media_km", 0.0))
-                    dist_max_km = float(getattr(s, "dist_max_km", 0.0))
+                    tempo_medio_min = float(s.metrics.get("tempo_medio_min", 0.0))
+                    tempo_max_min = float(s.metrics.get("tempo_max_min", 0.0))
+                    distancia_media_km = float(s.metrics.get("distancia_media_km", 0.0))
+                    dist_max_km = float(s.metrics.get("dist_max_km", 0.0))
+
 
                 # 🚀 FIX: JSON sempre serializável
                 subclusters_json = json.dumps(
@@ -563,7 +564,7 @@ class DatabaseWriter:
             return
 
         # 🚫 BLOQUEIA CEPS INVÁLIDOS NO CACHE MKP
-        from pdv_preprocessing.domain.utils_geo import cep_invalido
+        from mkp_preprocessing.domain.utils_geo import cep_invalido
         if tipo == "mkp":
             cep_clean = endereco.strip().replace("-", "").zfill(8)
             if cep_invalido(cep_clean):

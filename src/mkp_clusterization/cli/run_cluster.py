@@ -49,7 +49,13 @@ def main():
     parser.add_argument(
         "--algo",
         type=str,
-        choices=["kmeans", "kmeans_pure", "capacitated_sweep", "dense_subset"],
+        choices=[
+            "kmeans",
+            "kmeans_pure",
+            "capacitated_sweep",
+            "dense_subset",
+            "ativo_balanceado",
+        ],
         default="kmeans",
         help="Algoritmo de clusterização"
     )
@@ -73,6 +79,13 @@ def main():
         default=15,
         help="Tempo máximo (min) do centro do cluster até o PDV (kmeans_pure)"
     )
+
+    # ============================================================
+    # 🔥 ATIVO BALANCEADO
+    # ============================================================
+    parser.add_argument("--centros_csv", help="CSV com endereços dos centros")
+    parser.add_argument("--min_pdv", type=int, help="Mínimo de PDVs por centro")
+
 
     # ============================================================
     # Gerais
@@ -137,26 +150,55 @@ def main():
     # ============================================================
     # Execução
     # ============================================================
-    result = executar_clusterizacao(
-        tenant_id=args.tenant_id,
-        uf=uf,
-        cidade=cidade,
-        algo=args.algo,
-        dias_uteis=args.dias_uteis,
-        freq=args.freq,
-        workday_min=args.tempo_max_min,  # 🔥 SEMPRE tempo máx centro → PDV
-        route_km_max=args.routekm,
-        service_min=args.service,
-        v_kmh=args.vel,
-        alpha_path=1.0,
-        max_pdv_cluster=args.max_pdv_cluster,
-        descricao=args.descricao,
-        input_id=input_id,
-        clusterization_id=clusterization_id,
-        excluir_outliers=args.excluir_outliers,
-        z_thresh=args.z_thresh,
-        max_iter=args.max_iter,
-    )
+    if args.algo == "ativo_balanceado":
+        from src.mkp_clusterization.application.cluster_ativo_balanceado_use_case import (
+            ClusterAtivoBalanceadoUseCase,
+        )
+
+        if not args.centros_csv:
+            raise ValueError("--centros_csv é obrigatório para ativo_balanceado")
+
+        if args.min_pdv is None:
+            raise ValueError("--min_pdv é obrigatório para ativo_balanceado")
+
+        use_case = ClusterAtivoBalanceadoUseCase(
+            tenant_id=args.tenant_id,
+            uf=uf,
+            cidade=cidade,
+            input_id=input_id,
+            descricao=args.descricao,
+            centros_csv=args.centros_csv,
+            min_pdv=args.min_pdv,
+            max_pdv=args.max_pdv_cluster,
+            tempo_max_min=args.tempo_max_min,
+            v_kmh=args.vel,
+            max_iter=args.max_iter,
+        )
+
+        result = use_case.execute()
+
+    else:
+        result = executar_clusterizacao(
+            tenant_id=args.tenant_id,
+            uf=uf,
+            cidade=cidade,
+            algo=args.algo,
+            dias_uteis=args.dias_uteis,
+            freq=args.freq,
+            workday_min=args.tempo_max_min,
+            route_km_max=args.routekm,
+            service_min=args.service,
+            v_kmh=args.vel,
+            alpha_path=1.0,
+            max_pdv_cluster=args.max_pdv_cluster,
+            descricao=args.descricao,
+            input_id=input_id,
+            clusterization_id=clusterization_id,
+            excluir_outliers=args.excluir_outliers,
+            z_thresh=args.z_thresh,
+            max_iter=args.max_iter,
+        )
+
 
     print("\n=== RESULTADO FINAL ===")
     for campo in ("clusterization_id", "run_id", "k_final", "n_pdvs"):

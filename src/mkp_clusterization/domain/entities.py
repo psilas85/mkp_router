@@ -1,6 +1,4 @@
-# ==========================================================
-# 📦 src/sales_clusterization/domain/entities.py
-# ==========================================================
+#mkp_router/src/mkp_clusterization/domain/entities.py
 
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List
