@@ -15,6 +15,8 @@ from src.mkp_clusterization.domain.pdv_cluster_balanceador import balancear_clus
 from src.database.db_connection import get_connection
 from src.mkp_clusterization.domain.metrics_calculator import calcular_metricas_cluster
 from src.mkp_clusterization.infrastructure.persistence.database_writer import salvar_centros
+from mkp_preprocessing.domain.utils_geo import coordenada_generica
+
 
 from src.mkp_clusterization.infrastructure.persistence.database_reader import (
     carregar_pdvs,
@@ -79,10 +81,14 @@ class ClusterAtivoBalanceadoUseCase:
         self.reader = DatabaseReader(self.conn)
         self.writer = DatabaseWriter(self.conn)
 
+        enable_google = os.getenv("ENABLE_GOOGLE_GEOCODING", "false").lower() == "true"
+
         self.centros_geo = CentersGeolocationService(
             reader=self.reader,
             writer=self.writer,
+            google_key=os.getenv("GMAPS_API_KEY") if enable_google else None,
         )
+
 
 
     # ============================================================
@@ -246,12 +252,21 @@ class ClusterAtivoBalanceadoUseCase:
             finalizar_run(run_id, status="error", k_final=0, error=str(e))
             raise
 
-    # ============================================================
-    # 🔧 Helpers
-    # ============================================================
     def _carregar_centros(self) -> List[Dict[str, Any]]:
         if not os.path.exists(self.centros_csv):
             raise FileNotFoundError(self.centros_csv)
+
+        # ============================================================
+        # 📊 Estatísticas de diagnóstico
+        # ============================================================
+        stats = {
+            "lidos": 0,
+            "endereco_invalido": 0,
+            "geocode_falha": 0,
+            "coord_generica": 0,
+            "duplicado_coord": 0,
+            "validos": 0,
+        }
 
         # ============================================================
         # 1) Leitura do arquivo (XLSX ou CSV)
@@ -264,6 +279,8 @@ class ClusterAtivoBalanceadoUseCase:
             df = pd.read_csv(self.centros_csv, sep=None, engine="python")
         else:
             raise ValueError("Formato inválido. Use .xlsx ou .csv")
+
+        stats["lidos"] = len(df)
 
         # ============================================================
         # 2) Normalização de colunas
@@ -283,9 +300,10 @@ class ClusterAtivoBalanceadoUseCase:
         obrigatorias = ["logradouro", "bairro", "cidade", "uf"]
         faltantes = [c for c in obrigatorias if c not in df.columns]
         if faltantes:
-            raise ValueError(f"Colunas obrigatórias ausentes no arquivo de centros: {faltantes}")
+            raise ValueError(
+                f"Colunas obrigatórias ausentes no arquivo de centros: {faltantes}"
+            )
 
-        # garante colunas opcionais
         for c in ["numero", "cep", "cnpj", "bandeira"]:
             if c not in df.columns:
                 df[c] = ""
@@ -307,7 +325,6 @@ class ClusterAtivoBalanceadoUseCase:
                 return m.group(1).strip(), m.group(2).strip()
             return v, None
 
-        # normalizações básicas
         df["uf"] = df["uf"].astype(str).str.strip().str.upper()
         df["cidade"] = df["cidade"].astype(str).str.strip()
         df["bairro"] = df["bairro"].astype(str).str.strip()
@@ -319,7 +336,6 @@ class ClusterAtivoBalanceadoUseCase:
             logradouro = limpar(r["logradouro"])
             numero = limpar(r["numero"])
 
-            # tenta extrair número do logradouro se vier tudo junto
             if not numero:
                 logradouro, numero_extraido = separar_numero(logradouro)
                 if numero_extraido:
@@ -328,7 +344,6 @@ class ClusterAtivoBalanceadoUseCase:
             cidade = limpar(r["cidade"]) or (self.cidade or "")
             uf = limpar(r["uf"]) or (self.uf or "")
 
-            # regra mínima de validade
             if not logradouro or not cidade or not uf:
                 return ""
 
@@ -347,7 +362,10 @@ class ClusterAtivoBalanceadoUseCase:
         df["endereco_full"] = df["endereco_full"].str.strip()
 
         # descarta endereços inválidos
-        df = df[df["endereco_full"].str.len() > 10].copy()
+        invalidos = df["endereco_full"].str.len() <= 10
+        stats["endereco_invalido"] += int(invalidos.sum())
+        df = df[~invalidos].copy()
+
         df = df.drop_duplicates(subset=["endereco_full"])
 
         # ============================================================
@@ -359,12 +377,23 @@ class ClusterAtivoBalanceadoUseCase:
             endereco = r["endereco_full"]
 
             lat, lon, origem = self.centros_geo.buscar(endereco)
+
             if lat is None or lon is None:
+                stats["geocode_falha"] += 1
+                logger.debug(
+                    f"❌ Centro descartado | motivo=geocode_falha | endereco='{endereco}'"
+                )
+                continue
+
+            if coordenada_generica(lat, lon):
+                stats["coord_generica"] += 1
+                logger.debug(
+                    f"❌ Centro descartado | motivo=coord_generica | endereco='{endereco}'"
+                )
                 continue
 
             cnpj = limpar(r.get("cnpj"))
             cnpj = re.sub(r"\D", "", cnpj)
-
             bandeira = limpar(r.get("bandeira"))
 
             centros.append(
@@ -388,8 +417,10 @@ class ClusterAtivoBalanceadoUseCase:
             if k not in uniq:
                 uniq[k] = c
             else:
+                stats["duplicado_coord"] += 1
                 logger.warning(
-                    f"Centro duplicado por coordenada ignorado | "
+                    f"⚠️ Centro duplicado por coordenada ignorado | "
+                    f"lat={c['lat']} lon={c['lon']} "
                     f"cnpj={c.get('cnpj')} bandeira={c.get('bandeira')}"
                 )
 
@@ -398,6 +429,17 @@ class ClusterAtivoBalanceadoUseCase:
         # reindexa labels
         for i, c in enumerate(centros):
             c["cluster_label"] = i
+
+        stats["validos"] = len(centros)
+
+        # ============================================================
+        # 📊 LOG FINAL DE AUDITORIA (Loguru correto)
+        # ============================================================
+        logger.info(
+            f"🏭 Centros | lidos={stats['lidos']} válidos={stats['validos']} "
+            f"inv_end={stats['endereco_invalido']} geo_falha={stats['geocode_falha']} "
+            f"coord_gen={stats['coord_generica']} dup_coord={stats['duplicado_coord']}"
+        )
 
         return centros
 
